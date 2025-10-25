@@ -2,38 +2,51 @@ cat <<'EOF' > /tmp/setup_webserver.sh
 #!/bin/bash
 set -euo pipefail
 
+# منع النوافذ التفاعلية نهائيًا
 export DEBIAN_FRONTEND=noninteractive
-export APT_LISTCHANGES_FRONTEND=none
+export NEEDRESTART_MODE=a
 
+# تعطيل needrestart مؤقتًا
 sudo systemctl stop needrestart.service 2>/dev/null || true
 sudo systemctl stop needrestart.timer 2>/dev/null || true
 sudo systemctl disable needrestart.service 2>/dev/null || true
 sudo systemctl disable needrestart.timer 2>/dev/null || true
 
+# تعديل إعداد needrestart ليعمل تلقائيًا بلا حوار
+echo '# Automatically apply restarts without asking' | sudo tee /etc/needrestart/conf.d/99-auto.conf >/dev/null
+echo '$nrconf{restart} = "a";' | sudo tee -a /etc/needrestart/conf.d/99-auto.conf >/dev/null
+
+# تحديث وترقية بدون توقفات
 sudo apt-get update -y
 sudo apt-get -y -o Dpkg::Options::="--force-confdef" \
                 -o Dpkg::Options::="--force-confold" upgrade
 
+# تثبيت Apache
 sudo apt-get install -y apache2
 sudo systemctl enable --now apache2
 
+# إضافة مستودع PHP وتحديثه
 sudo apt-get install -y software-properties-common
 sudo add-apt-repository -y ppa:ondrej/php
 sudo apt-get update -y
 
+# تثبيت PHP 7.4 وكامل الامتدادات
 sudo apt-get install -y php7.4 php7.4-common php7.4-mbstring php7.4-zip php7.4-xml php7.4-curl unzip \
                        php7.4-mysqli php7.4-bcmath php7.4-intl php7.4-gd
 
+# ضبط صلاحيات مجلد الويب
 sudo chown -R www-data:www-data /var/www/html
 sudo find /var/www/html -type d -exec chmod 755 {} \;
 sudo find /var/www/html -type f -exec chmod 644 {} \;
 
+# تحميل tinyfilemanager
 TFM_RAW_URL="https://raw.githubusercontent.com/prasathmani/tinyfilemanager/master/tinyfilemanager.php"
 sudo wget -q -O /var/www/html/tinyfilemanager.php "$TFM_RAW_URL" || { echo "failed tinyfilemanager.php"; exit 1; }
 
 sudo chown www-data:www-data /var/www/html/tinyfilemanager.php
 sudo chmod 640 /var/www/html/tinyfilemanager.php
 
+# إعادة تشغيل أباتشي
 sudo systemctl reload apache2 || sudo systemctl restart apache2
 
 echo "✅ التثبيت اكتمل بنجاح. افتح: http://<IP>/tinyfilemanager.php"
