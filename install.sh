@@ -1,4 +1,4 @@
-cat <<'EOF' > /tmp/setup_webserver.sh
+cat <<'EOF' > /tmp/install.sh
 #!/bin/bash
 set -euo pipefail
 
