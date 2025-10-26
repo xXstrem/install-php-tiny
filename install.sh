@@ -45,6 +45,7 @@ cat <<'BANNER'
                                              |___/           
 BANNER
 
+# Ask for username and password (or use environment vars)
 if [ -z "${TFM_USER:-}" ] || [ -z "${TFM_PASS:-}" ]; then
   read -p "Enter username: " TFM_USER
   while [ -z "$TFM_USER" ]; do
