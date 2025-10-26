@@ -16,8 +16,8 @@ sudo apt-get -y -o Dpkg::Options::="--force-confdef" \
 sudo apt-get install -y apache2
 sudo systemctl enable --now apache2
 
+# utilities and php ppa
 sudo apt-get install -y software-properties-common wget unzip
-# add PPA for php7.4 if not present
 sudo add-apt-repository -y ppa:ondrej/php || true
 sudo apt-get update -y
 
@@ -25,6 +25,7 @@ sudo apt-get update -y
 sudo apt-get install -y php7.4 php7.4-cli php7.4-common php7.4-mbstring php7.4-zip php7.4-xml php7.4-curl unzip \
                        php7.4-mysqli php7.4-bcmath php7.4-intl php7.4-gd
 
+# set permissions for web root
 sudo chown -R www-data:www-data /var/www/html
 sudo find /var/www/html -type d -exec chmod 755 {} \;
 sudo find /var/www/html -type f -exec chmod 644 {} \;
@@ -37,9 +38,10 @@ sudo mv /var/www/html/tinyfilemanager.php /var/www/html/manager.php
 sudo chown www-data:www-data /var/www/html/manager.php
 sudo chmod 640 /var/www/html/manager.php
 
-# reload apache
+# reload apache to pick up files
 sudo systemctl reload apache2 || sudo systemctl restart apache2
 
+# clear screen and show banner
 clear
 cat <<'BANNER'
   ______ _ _        __  __                                   
@@ -52,25 +54,24 @@ cat <<'BANNER'
                                              |___/           
 BANNER
 
-echo ""
-# ask for username + password AFTER the banner (as requested)
-read -p "Enter username to add to manager.php: " TFM_USER_RAW
+# ------- prompt user for username/password (single place) -------
+read -p "Enter username to add/update in manager.php: " TFM_USER_RAW
 while [ -z "${TFM_USER_RAW:-}" ]; do
   echo "Username cannot be empty. Try again."
-  read -p "Enter username to add to manager.php: " TFM_USER_RAW
+  read -p "Enter username to add/update in manager.php: " TFM_USER_RAW
 done
 
-# sanitize username: allow only alnum, dot, underscore, hyphen
-TFM_USER=$(echo "$TFM_USER_RAW" | sed 's/[^A-Za-z0-9._-]//g')
+# sanitize username: allow only letters, digits, dot, underscore, hyphen
+TFM_USER=$(printf '%s' "$TFM_USER_RAW" | sed 's/[^A-Za-z0-9._-]//g')
 if [ -z "$TFM_USER" ]; then
-  echo "After sanitization the username became empty. Exiting."
+  echo "After sanitization username is empty. Exiting."
   exit 1
 fi
 if [ "$TFM_USER" != "$TFM_USER_RAW" ]; then
-  echo "Note: username contained disallowed characters; using sanitized username: $TFM_USER"
+  echo "Note: using sanitized username: $TFM_USER"
 fi
 
-# prompt for password (hidden)
+# password prompt (hidden) and confirmation
 while true; do
   read -s -p "Enter password for user '$TFM_USER': " TFM_PASS
   echo
@@ -93,60 +94,49 @@ if [ -z "$TFM_HASH" ]; then
   exit 1
 fi
 
-# prepare temp auth block
-TMP_AUTH="/tmp/auth_block_$$.php"
-cat > "$TMP_AUTH" <<EOF
-\$auth_users = array(
-    '$TFM_USER' => '$TFM_HASH'
-);
-EOF
-
+# target manager.php
 TFM_FILE="/var/www/html/manager.php"
-
 if [ ! -f "$TFM_FILE" ]; then
   echo "manager.php not found at $TFM_FILE. Exiting."
-  rm -f "$TMP_AUTH"
   exit 1
 fi
 
-# Escape $ in hash for use in shell/Perl double-quoted replacement
+# escape backslashes and dollar signs for use in perl replacement
 ESC_HASH=$(printf '%s' "$TFM_HASH" | sed 's/\\/\\\\/g; s/\$/\\\$/g')
 
-# Check if $auth_users array exists in target file
+# insert or update user in $auth_users array
 if grep -q "\$auth_users\s*=" "$TFM_FILE"; then
-  # If username already exists, replace its hash
   if grep -qE "['\"]${TFM_USER}['\"]\s*=>\s*['\"][^'\"]*['\"]" "$TFM_FILE"; then
     echo "User '$TFM_USER' exists — updating hash."
-    # use perl to replace the existing user's hash (escape $ in replacement)
     sudo perl -0777 -i -pe "s/(['\"])${TFM_USER}(['\"]\s*=>\s*['\"])[^'\"]*(['\"])/\$1${TFM_USER}\$2${ESC_HASH}\$3/s" "$TFM_FILE"
   else
     echo "User '$TFM_USER' not found — inserting new entry into \$auth_users array."
-    # Insert new entry before the closing ');' of the $auth_users array.
-    # append with a leading comma if array already has entries (perl non-greedy)
     sudo perl -0777 -i -pe "s/(\$auth_users\s*=\s*array\s*\(\s*)(.*?)(\s*\);)/\$1\$2,\n    '${TFM_USER}' => '${ESC_HASH}'\n\$3/s" "$TFM_FILE"
   fi
 else
   echo "No \$auth_users array found — prepending a new block."
-  # Prepend new block if none exists
-  sudo bash -c "cat \"$TMP_AUTH\" \"$TFM_FILE\" > \"$TFM_FILE.new\" && mv \"$TFM_FILE.new\" \"$TFM_FILE\""
+  TMP_AUTH="$(mktemp)"
+  cat > "$TMP_AUTH" <<EOF
+\$auth_users = array(
+    '${TFM_USER}' => '${TFM_HASH}'
+);
+EOF
+  sudo bash -c "cat '$TMP_AUTH' '$TFM_FILE' > '$TFM_FILE.new' && mv '$TFM_FILE.new' '$TFM_FILE'"
+  rm -f "$TMP_AUTH"
 fi
 
-# cleanup temp file
-rm -f "$TMP_AUTH"
+# fix ownership and permissions
+sudo chown www-data:www-data "$TFM_FILE" || true
+sudo chmod 640 "$TFM_FILE" || true
 
-sudo chown www-data:www-data "$TFM_FILE"
-sudo chmod 640 "$TFM_FILE"
+echo "Done: user '$TFM_USER' added/updated in $TFM_FILE"
 
-sudo systemctl reload apache2 || sudo systemctl restart apache2
-
-clear
-cat <<'FIN'
-Installation and configuration completed successfully!
-Credentials were written (hashed) into /var/www/html/manager.php
-
-Now open: http://<IP-or-domain>/manager.php
-FIN
+echo ""
+echo "Installation completed successfully!"
+echo "Now open : http://<IP-or-domain>/manager.php"
 EOF
 
 chmod +x /tmp/setup_webserver.sh
-sudo /tmp/setup_webserver.sh
+
+# Note: next line intentionally not auto-run; run manually when ready:
+# sudo /tmp/setup_webserver.sh
