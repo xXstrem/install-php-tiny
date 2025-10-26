@@ -1,27 +1,39 @@
 #!/bin/bash
 set -euo pipefail
 
+# === System Environment Setup ===
+
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
+# Configure needrestart to avoid prompts during upgrade
 sudo bash -c 'cat > /etc/needrestart/needrestart.conf <<CONF
 $nrconf{restart} = "a";
 CONF'
 
+# Update and upgrade system packages
 sudo apt-get update -y
 sudo apt-get -y -o Dpkg::Options::="--force-confdef" \
                -o Dpkg::Options::="--force-confold" upgrade
 
+# === Install Apache2 and Enable ===
+
 sudo apt-get install -y apache2
 sudo systemctl enable --now apache2
 
+# === Install PHP 7.4 and Extensions ===
+
+# Install utility packages and add PHP PPA
 sudo apt-get install -y software-properties-common wget unzip
 sudo add-apt-repository -y ppa:ondrej/php || true
 sudo apt-get update -y
 
+# Install PHP 7.4, extensions, and the required Apache module
 sudo apt-get install -y php7.4 php7.4-cli php7.4-common php7.4-mbstring php7.4-zip php7.4-xml php7.4-curl unzip \
                        php7.4-mysqli php7.4-bcmath php7.4-intl php7.4-gd \
                        libapache2-mod-php7.4
+
+# === Setup Tiny File Manager Permissions and Download ===
 
 sudo chown -R www-data:www-data /var/www/html
 sudo find /var/www/html -type d -exec chmod 755 {} \;
@@ -36,72 +48,116 @@ sudo systemctl reload apache2 || sudo systemctl restart apache2
 
 clear
 
-if [ -z "${TFM_USER:-}" ] || [ -z "${TFM_PASS:-}" ]; then
-  read -p "Enter username: " TFM_USER
-  while [ -z "$TFM_USER" ]; do
-    echo "Username cannot be empty."
-    read -p "Enter username: " TFM_USER
-  done
-  while true; do
-    read -s -p "Enter password: " TFM_PASS
-    echo
-    read -s -p "Confirm password: " TFM_PASS2
-    echo
-    [ -z "$TFM_PASS" ] && { echo "Password cannot be empty."; continue; }
-    [ "$TFM_PASS" = "$TFM_PASS2" ] && break
-    echo "Passwords do not match."
-  done
-fi
+read -p "Username to set in manager.php: " NEW_USER
+while [ -z "${NEW_USER:-}" ]; do
+  echo "Username cannot be empty."
+  read -p "Username to set in manager.php: " NEW_USER
+done
 
-TFM_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$TFM_PASS")
-TFM_FILE="/var/www/html/manager.php"
+while true; do
+  read -s -p "Password: " NEW_PASS; echo
+  read -s -p "Confirm password: " NEW_PASS2; echo
+  [ -z "${NEW_PASS:-}" ] && { echo "Password cannot be empty."; continue; }
+  [ "$NEW_PASS" = "$NEW_PASS2" ] && break
+  echo "Passwords do not match. Try again."
+done
 
-if [ ! -f "$TFM_FILE" ]; then
-  echo "manager.php not found at $TFM_FILE. Exiting."
+# 2) Generate bcrypt hash (PHP CLI)
+if ! command -v php >/dev/null 2>&1; then
+  echo "Error: php CLI not found. Please install php-cli."
   exit 1
 fi
 
-# Escape quotes in Bash variables for safe injection into PHP string literals
-TFM_USER_ESC=$(printf '%s' "$TFM_USER" | sed "s/'/\\\'/g")
-TFM_HASH_ESC=$(printf '%s' "$TFM_HASH" | sed "s/'/\\\'/g")
+NEW_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$NEW_PASS")
+if [ -z "$NEW_HASH" ]; then
+  echo "Error: failed to generate hash."
+  exit 1
+fi
+echo "Generated hash length: ${#NEW_HASH}"
 
-TFM_PHP_SCRIPT=$(mktemp)
-# Use unquoted heredoc (<<PHP_CODE) to allow Bash variable substitution
-cat <<PHP_CODE > "$TFM_PHP_SCRIPT"
+# 3) File paths and backup
+TFM_FILE="/var/www/html/manager.php"
+if [ ! -f "$TFM_FILE" ]; then
+  echo "ERROR: $TFM_FILE not found. Aborting."
+  exit 1
+fi
+
+BACKUP="/var/www/html/manager.php.bak.$(date +%s)"
+sudo cp "$TFM_FILE" "$BACKUP"
+echo "Backup created at: $BACKUP"
+
+# 4) Safe replacement using PHP to avoid regex escaping issues
+sudo NEW_USER="$NEW_USER" NEW_HASH="$NEW_HASH" php <<'PHP'
 <?php
-// Define path, user, and hash directly from Bash injection
-\$file = getenv('TFM_FILE'); 
-\$u = '$TFM_USER_ESC';
-\$h = '$TFM_HASH_ESC';
+$file = '/var/www/html/manager.php';
+if (!file_exists($file)) {
+    echo "ERROR: manager.php not found at $file\n";
+    exit(1);
+}
+$s = file_get_contents($file);
 
-if (!file_exists(\$file)) { echo "manager.php not found\n"; exit(1); }
-\$s = file_get_contents(\$file);
-
-// Regex to capture the entire \$auth_users = array(...) block
-\$regex = '/(\$auth_users\s*=\s*array\s*\()([\s\S]*?)(\);)/i';
-
-// Build the new auth entry
-\$new_auth_entries = "";
-\$new_auth_entries .= "\n    '".\$u."' => '".\$h."',\n";
-
-// Build the replacement block (containing ONLY the new user)
-\$new_block = "\$auth_users = array(" . \$new_auth_entries . ");";
-
-// Replace the old \$auth_users block entirely with the new one
-if (preg_match(\$regex, \$s)) {
-    \$s = preg_replace(\$regex, \$new_block, \$s, 1);
-} else {
-    \$s = \$new_block . "\n" . \$s;
+// Environment variables passed by sudo wrapper
+$u = getenv('NEW_USER');
+$h = getenv('NEW_HASH');
+if ($u === false || $h === false) {
+    echo "ERROR: NEW_USER or NEW_HASH env var missing\n";
+    exit(1);
 }
 
-file_put_contents(\$file, \$s);
-echo "ok\n";
-PHP_CODE
+// Prepare escaped values for insertion
+$u_esc = str_replace("'", "\\'", $u);
+$h_esc = str_replace("'", "\\'", $h);
 
-# Execute the temporary script using sudo
-sudo TFM_FILE="$TFM_FILE" php "$TFM_PHP_SCRIPT"
+// 1) Try replace exact placeholder entry
+$pattern_exact = "/['\"]userrrrrrrrrr['\"]\\s*=>\\s*['\"]passwordhash['\"]\\s*,?/s";
+$replacement = "'" . $u_esc . "' => '" . $h_esc . "',";
 
-rm -f "$TFM_PHP_SCRIPT"
+if (preg_match($pattern_exact, $s)) {
+    $s = preg_replace($pattern_exact, $replacement, $s, 1);
+    file_put_contents($file, $s);
+    echo "Replaced exact placeholder with user '{$u}' in $file\n";
+    exit(0);
+}
+
+// 2) If key 'userrrrrrrrrr' exists, replace its value
+$pattern_key = "/(['\"])userrrrrrrrrr\\1\\s*=>\\s*['\"][^'\"]*['\"]/s";
+if (preg_match($pattern_key, $s)) {
+    $s = preg_replace($pattern_key, "'" . $u_esc . "' => '" . $h_esc . "'", $s, 1);
+    file_put_contents($file, $s);
+    echo "Replaced key 'userrrrrrrrrr' value with new hash.\n";
+    exit(0);
+}
+
+// 3) If literal 'passwordhash' exists anywhere in the file, replace first occurrence
+if (strpos($s, "passwordhash") !== false) {
+    $s = preg_replace("/passwordhash/", $h_esc, $s, 1);
+    file_put_contents($file, $s);
+    echo "Replaced first occurrence of 'passwordhash' with new hash.\n";
+    exit(0);
+}
+
+// 4) If nothing matched, prepend a new $auth_users block (non-destructive)
+$new_block = "\$auth_users = array(\n    '" . $u_esc . "' => '" . $h_esc . "',\n);\n\n";
+$s = $new_block . $s;
+file_put_contents($file, $s);
+echo "No placeholder found; prepended new \$auth_users block with user '{$u}'.\n";
+exit(0);
+PHP
+
+# 5) Fix ownership/permissions
+sudo chown www-data:www-data "$TFM_FILE" || true
+sudo chmod 640 "$TFM_FILE" || true
+
+# 6) Summary
+echo "Done. Check $TFM_FILE and login with username: $NEW_USER"
+echo "Backup kept at: $BACKUP"
+
+
+
+
+
+
+
 
 sudo chown www-data:www-data "$TFM_FILE"
 sudo chmod 640 "$TFM_FILE"
