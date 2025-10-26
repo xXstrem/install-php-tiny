@@ -1,39 +1,27 @@
 #!/bin/bash
 set -euo pipefail
 
-# === System Environment Setup ===
-
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-# Configure needrestart to avoid prompts during upgrade
 sudo bash -c 'cat > /etc/needrestart/needrestart.conf <<CONF
 $nrconf{restart} = "a";
 CONF'
 
-# Update and upgrade system packages
 sudo apt-get update -y
 sudo apt-get -y -o Dpkg::Options::="--force-confdef" \
                -o Dpkg::Options::="--force-confold" upgrade
 
-# === Install Apache2 and Enable ===
-
 sudo apt-get install -y apache2
 sudo systemctl enable --now apache2
 
-# === Install PHP 7.4 and Extensions ===
-
-# Install utility packages and add PHP PPA
 sudo apt-get install -y software-properties-common wget unzip
 sudo add-apt-repository -y ppa:ondrej/php || true
 sudo apt-get update -y
 
-# Install PHP 7.4, extensions, and the required Apache module
 sudo apt-get install -y php7.4 php7.4-cli php7.4-common php7.4-mbstring php7.4-zip php7.4-xml php7.4-curl unzip \
                        php7.4-mysqli php7.4-bcmath php7.4-intl php7.4-gd \
                        libapache2-mod-php7.4
-
-# === Setup Tiny File Manager Permissions and Download ===
 
 sudo chown -R www-data:www-data /var/www/html
 sudo find /var/www/html -type d -exec chmod 755 {} \;
@@ -48,7 +36,6 @@ sudo systemctl reload apache2 || sudo systemctl restart apache2
 
 clear
 
-# تفاعلي: يطلب يوزر + باسورد ثم يولد هاش bcrypt cost=10 ويحدث manager.php
 read -p "Username: " NEW_USER
 while [ -z "${NEW_USER:-}" ]; do read -p "Username: " NEW_USER; done
 while true; do
@@ -59,11 +46,10 @@ while true; do
   echo "Passwords do not match."
 done
 
-# generate bcrypt with explicit cost=10
+# generate bcrypt hash with cost=10
 NEW_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT, ["cost" => 10]);' "$NEW_PASS")
 echo "Generated hash: $NEW_HASH"
 
-# update manager.php safely (same PHP updater as before)
 TFM_FILE="/var/www/html/manager.php"
 sudo NEW_USER="$NEW_USER" NEW_HASH="$NEW_HASH" php <<'PHP'
 <?php
@@ -84,14 +70,9 @@ PHP
 
 sudo chown www-data:www-data "$TFM_FILE" || true
 sudo chmod 640 "$TFM_FILE" || true
-echo "Done. Login with: $NEW_USER"
-
-
-sudo chown www-data:www-data "$TFM_FILE"
-sudo chmod 640 "$TFM_FILE"
 sudo systemctl reload apache2 || sudo systemctl restart apache2
 
 echo
 echo "✅ Installation completed successfully!"
 echo "➡️  Open: http://<IP-or-domain>/manager.php"
-echo "👤 User: $TFM_USER"
+echo "👤 User: $NEW_USER"
