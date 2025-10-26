@@ -63,20 +63,33 @@ if [ -z "${TFM_USER:-}" ] || [ -z "${TFM_PASS:-}" ]; then
   done
 fi
 
-# generate bcrypt hash
+# 1) ادخل اسم المستخدم وكلمة المرور تفاعلياً (نفّذ السطور التالية)
+read -p "Username: " TFM_USER
+while [ -z "${TFM_USER:-}" ]; do
+  echo "Username cannot be empty."
+  read -p "Username: " TFM_USER
+done
+
+while true; do
+  read -s -p "Password: " TFM_PASS; echo
+  read -s -p "Confirm password: " TFM_PASS2; echo
+  [ -z "${TFM_PASS:-}" ] && { echo "Password cannot be empty."; continue; }
+  [ "$TFM_PASS" = "$TFM_PASS2" ] && break
+  echo "Passwords do not match — try again."
+done
+
+# 2) ولّد الهاش باستخدام PHP CLI
 TFM_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$TFM_PASS")
-TFM_FILE="/var/www/html/manager.php"
+echo "Generated hash length: ${#TFM_HASH}"
 
-if [ ! -f "$TFM_FILE" ]; then
-  echo "manager.php not found at $TFM_FILE. Exiting."
-  exit 1
-fi
-
-# Use PHP to safely add/update the user in manager.php
-sudo TFM_USER="$TFM_USER" TFM_HASH="$TFM_HASH" php - <<'PHP'
+# 3) استدعاء آمن بــ sudo + heredoc (بدون '-') للتعديل داخل manager.php
+sudo TFM_USER="$TFM_USER" TFM_HASH="$TFM_HASH" php <<'PHP'
 <?php
 $file = '/var/www/html/manager.php';
-if (!file_exists($file)) { echo "manager.php not found\n"; exit(1); }
+if (!file_exists($file)) {
+    echo "ERROR: manager.php not found at $file\n";
+    exit(1);
+}
 $s = file_get_contents($file);
 
 // extract existing auth entries
@@ -84,6 +97,7 @@ preg_match_all("/['\"]([^'\"]+)['\"]\s*=>\s*['\"]([^'\"]+)['\"]/",$s,$m,PREG_SET
 $arr = array();
 foreach($m as $p){ $arr[$p[1]] = $p[2]; }
 
+// get env vars
 $u = getenv('TFM_USER');
 $h = getenv('TFM_HASH');
 $arr[$u] = $h;
@@ -97,6 +111,7 @@ foreach($arr as $k => $v){
 }
 $new .= ");";
 
+// replace existing block or prepend
 if (preg_match("/\\$auth_users\\s*=\\s*array\\s*\\([^;]*\\);/s",$s)) {
   $s = preg_replace("/\\$auth_users\\s*=\\s*array\\s*\\([^;]*\\);/s", $new, $s, 1);
 } else {
@@ -104,8 +119,14 @@ if (preg_match("/\\$auth_users\\s*=\\s*array\\s*\\([^;]*\\);/s",$s)) {
 }
 
 file_put_contents($file, $s);
-echo "ok\n";
+echo "Updated $file (user: $u)\n";
 PHP
+
+# 4) تحقق سريع
+echo "---- auth lines in manager.php ----"
+sudo grep -n "\$auth_users" /var/www/html/manager.php || true
+sudo tail -n 20 /var/www/html/manager.php
+
 
 
 sudo chown www-data:www-data "$TFM_FILE"
