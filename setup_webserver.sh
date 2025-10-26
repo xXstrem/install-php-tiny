@@ -54,11 +54,21 @@ BANNER
 
 echo ""
 # ask for username + password AFTER the banner (as requested)
-read -p "Enter username to add to manager.php: " TFM_USER
-while [ -z "${TFM_USER:-}" ]; do
+read -p "Enter username to add to manager.php: " TFM_USER_RAW
+while [ -z "${TFM_USER_RAW:-}" ]; do
   echo "Username cannot be empty. Try again."
-  read -p "Enter username to add to manager.php: " TFM_USER
+  read -p "Enter username to add to manager.php: " TFM_USER_RAW
 done
+
+# sanitize username: allow only alnum, dot, underscore, hyphen
+TFM_USER=$(echo "$TFM_USER_RAW" | sed 's/[^A-Za-z0-9._-]//g')
+if [ -z "$TFM_USER" ]; then
+  echo "After sanitization the username became empty. Exiting."
+  exit 1
+fi
+if [ "$TFM_USER" != "$TFM_USER_RAW" ]; then
+  echo "Note: username contained disallowed characters; using sanitized username: $TFM_USER"
+fi
 
 # prompt for password (hidden)
 while true; do
@@ -83,7 +93,7 @@ if [ -z "$TFM_HASH" ]; then
   exit 1
 fi
 
-# create temporary auth block file (expanded variables)
+# prepare temp auth block
 TMP_AUTH="/tmp/auth_block_$$.php"
 cat > "$TMP_AUTH" <<EOF
 \$auth_users = array(
@@ -91,20 +101,41 @@ cat > "$TMP_AUTH" <<EOF
 );
 EOF
 
-# attempt to replace existing $auth_users = array(...); block in manager.php
-# use perl with slurp to handle multiline replacement
-sudo perl -0777 -i -pe 'BEGIN{ $r = do q('"$TMP_AUTH"'); } s/\$auth_users\s*=\s*array\s*\([^;]*\);/$r/s' /var/www/html/manager.php
+TFM_FILE="/var/www/html/manager.php"
 
-# if replacement didn't occur (no $auth_users found), prepend the block to the file
-if ! grep -q "\$auth_users\s*=" /var/www/html/manager.php; then
-  sudo bash -c "cat \"$TMP_AUTH\" /var/www/html/manager.php > /var/www/html/manager.php.new && mv /var/www/html/manager.php.new /var/www/html/manager.php"
+if [ ! -f "$TFM_FILE" ]; then
+  echo "manager.php not found at $TFM_FILE. Exiting."
+  rm -f "$TMP_AUTH"
+  exit 1
+fi
+
+# Escape $ in hash for use in shell/Perl double-quoted replacement
+ESC_HASH=$(printf '%s' "$TFM_HASH" | sed 's/\\/\\\\/g; s/\$/\\\$/g')
+
+# Check if $auth_users array exists in target file
+if grep -q "\$auth_users\s*=" "$TFM_FILE"; then
+  # If username already exists, replace its hash
+  if grep -qE "['\"]${TFM_USER}['\"]\s*=>\s*['\"][^'\"]*['\"]" "$TFM_FILE"; then
+    echo "User '$TFM_USER' exists — updating hash."
+    # use perl to replace the existing user's hash (escape $ in replacement)
+    sudo perl -0777 -i -pe "s/(['\"])${TFM_USER}(['\"]\s*=>\s*['\"])[^'\"]*(['\"])/\$1${TFM_USER}\$2${ESC_HASH}\$3/s" "$TFM_FILE"
+  else
+    echo "User '$TFM_USER' not found — inserting new entry into \$auth_users array."
+    # Insert new entry before the closing ');' of the $auth_users array.
+    # append with a leading comma if array already has entries (perl non-greedy)
+    sudo perl -0777 -i -pe "s/(\$auth_users\s*=\s*array\s*\(\s*)(.*?)(\s*\);)/\$1\$2,\n    '${TFM_USER}' => '${ESC_HASH}'\n\$3/s" "$TFM_FILE"
+  fi
+else
+  echo "No \$auth_users array found — prepending a new block."
+  # Prepend new block if none exists
+  sudo bash -c "cat \"$TMP_AUTH\" \"$TFM_FILE\" > \"$TFM_FILE.new\" && mv \"$TFM_FILE.new\" \"$TFM_FILE\""
 fi
 
 # cleanup temp file
 rm -f "$TMP_AUTH"
 
-sudo chown www-data:www-data /var/www/html/manager.php
-sudo chmod 640 /var/www/html/manager.php
+sudo chown www-data:www-data "$TFM_FILE"
+sudo chmod 640 "$TFM_FILE"
 
 sudo systemctl reload apache2 || sudo systemctl restart apache2
 
