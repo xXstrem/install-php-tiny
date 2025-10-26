@@ -94,6 +94,74 @@ cat <<'BANNER'
                                              |___/           
 BANNER
 
+read -p "Enter username to add/update in manager.php: " TFM_USER_RAW
+while [ -z "${TFM_USER_RAW:-}" ]; do
+  echo "Username cannot be empty. Try again."
+  read -p "Enter username to add/update in manager.php: " TFM_USER_RAW
+done
+TFM_USER=$(printf '%s' "$TFM_USER_RAW" | sed 's/[^A-Za-z0-9._-]//g')
+if [ -z "$TFM_USER" ]; then
+  echo "After sanitization username is empty. Exiting."
+  exit 1
+fi
+if [ "$TFM_USER" != "$TFM_USER_RAW" ]; then
+  echo "Note: using sanitized username: $TFM_USER"
+fi
+
+while true; do
+  read -s -p "Enter password for user '$TFM_USER': " TFM_PASS
+  echo
+  read -s -p "Confirm password: " TFM_PASS2
+  echo
+  if [ -z "${TFM_PASS:-}" ]; then
+    echo "Password cannot be empty. Try again."
+    continue
+  fi
+  if [ "$TFM_PASS" = "$TFM_PASS2" ]; then
+    break
+  fi
+  echo "Passwords do not match — try again."
+done
+
+TFM_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$TFM_PASS")
+if [ -z "$TFM_HASH" ]; then
+  echo "Failed to generate password hash. Exiting."
+  exit 1
+fi
+
+TFM_FILE="/var/www/html/manager.php"
+if [ ! -f "$TFM_FILE" ]; then
+  echo "manager.php not found at $TFM_FILE. Exiting."
+  exit 1
+fi
+
+ESC_HASH=$(printf '%s' "$TFM_HASH" | sed 's/\\/\\\\/g; s/\$/\\\$/g')
+
+if grep -q "\$auth_users\s*=" "$TFM_FILE"; then
+  if grep -qE "['\"]${TFM_USER}['\"]\s*=>\s*['\"][^'\"]*['\"]" "$TFM_FILE"; then
+    echo "User '$TFM_USER' exists — updating hash."
+    sudo perl -0777 -i -pe "s/(['\"])${TFM_USER}(['\"]\s*=>\s*['\"])[^'\"]*(['\"])/\$1${TFM_USER}\$2${ESC_HASH}\$3/s" "$TFM_FILE"
+  else
+    echo "User '$TFM_USER' not found — inserting new entry into \$auth_users array."
+    sudo perl -0777 -i -pe "s/(\$auth_users\s*=\s*array\s*\(\s*)(.*?)(\s*\);)/\$1\$2,\n    '${TFM_USER}' => '${ESC_HASH}'\n\$3/s" "$TFM_FILE"
+  fi
+else
+  echo "No \$auth_users array found — prepending a new block."
+  TMP_AUTH="$(mktemp)"
+  cat > "$TMP_AUTH" <<EOF
+\$auth_users = array(
+    '${TFM_USER}' => '${TFM_HASH}'
+);
+EOF
+  sudo bash -c "cat '$TMP_AUTH' '$TFM_FILE' > '$TFM_FILE.new' && mv '$TFM_FILE.new' '$TFM_FILE'"
+  rm -f "$TMP_AUTH"
+fi
+
+sudo chown www-data:www-data "$TFM_FILE" || true
+sudo chmod 640 "$TFM_FILE" || true
+
+echo "Done: user '$TFM_USER' added/updated in $TFM_FILE"
+
 echo ""
 echo "Installation completed successfully!"
 echo "Now open : http://<IP-or-domain>/manager.php"
