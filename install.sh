@@ -48,121 +48,50 @@ sudo systemctl reload apache2 || sudo systemctl restart apache2
 
 clear
 
-read -p "Username to set in manager.php: " NEW_USER
-while [ -z "${NEW_USER:-}" ]; do
-  echo "Username cannot be empty."
-  read -p "Username to set in manager.php: " NEW_USER
-done
-
+# تفاعلي: يطلب يوزر + باسورد ثم يولد هاش bcrypt cost=10 ويحدث manager.php
+read -p "Username: " NEW_USER
+while [ -z "${NEW_USER:-}" ]; do read -p "Username: " NEW_USER; done
 while true; do
   read -s -p "Password: " NEW_PASS; echo
   read -s -p "Confirm password: " NEW_PASS2; echo
   [ -z "${NEW_PASS:-}" ] && { echo "Password cannot be empty."; continue; }
   [ "$NEW_PASS" = "$NEW_PASS2" ] && break
-  echo "Passwords do not match. Try again."
+  echo "Passwords do not match."
 done
 
-# 2) Generate bcrypt hash (PHP CLI)
-if ! command -v php >/dev/null 2>&1; then
-  echo "Error: php CLI not found. Please install php-cli."
-  exit 1
-fi
+# generate bcrypt with explicit cost=10
+NEW_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT, ["cost" => 10]);' "$NEW_PASS")
+echo "Generated hash: $NEW_HASH"
 
-NEW_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$NEW_PASS")
-if [ -z "$NEW_HASH" ]; then
-  echo "Error: failed to generate hash."
-  exit 1
-fi
-echo "Generated hash length: ${#NEW_HASH}"
-
-# 3) File paths and backup
+# update manager.php safely (same PHP updater as before)
 TFM_FILE="/var/www/html/manager.php"
-if [ ! -f "$TFM_FILE" ]; then
-  echo "ERROR: $TFM_FILE not found. Aborting."
-  exit 1
-fi
-
-BACKUP="/var/www/html/manager.php.bak.$(date +%s)"
-sudo cp "$TFM_FILE" "$BACKUP"
-echo "Backup created at: $BACKUP"
-
-# 4) Safe replacement using PHP to avoid regex escaping issues
 sudo NEW_USER="$NEW_USER" NEW_HASH="$NEW_HASH" php <<'PHP'
 <?php
 $file = '/var/www/html/manager.php';
-if (!file_exists($file)) {
-    echo "ERROR: manager.php not found at $file\n";
-    exit(1);
-}
+if (!file_exists($file)) { echo "manager.php not found\n"; exit(1); }
 $s = file_get_contents($file);
-
-// Environment variables passed by sudo wrapper
-$u = getenv('NEW_USER');
-$h = getenv('NEW_HASH');
-if ($u === false || $h === false) {
-    echo "ERROR: NEW_USER or NEW_HASH env var missing\n";
-    exit(1);
-}
-
-// Prepare escaped values for insertion
-$u_esc = str_replace("'", "\\'", $u);
-$h_esc = str_replace("'", "\\'", $h);
-
-// 1) Try replace exact placeholder entry
+$u = getenv('NEW_USER'); $h = getenv('NEW_HASH');
+$u_esc = str_replace("'", "\\'", $u); $h_esc = str_replace("'", "\\'", $h);
 $pattern_exact = "/['\"]userrrrrrrrrr['\"]\\s*=>\\s*['\"]passwordhash['\"]\\s*,?/s";
 $replacement = "'" . $u_esc . "' => '" . $h_esc . "',";
-
-if (preg_match($pattern_exact, $s)) {
-    $s = preg_replace($pattern_exact, $replacement, $s, 1);
-    file_put_contents($file, $s);
-    echo "Replaced exact placeholder with user '{$u}' in $file\n";
-    exit(0);
-}
-
-// 2) If key 'userrrrrrrrrr' exists, replace its value
+if (preg_match($pattern_exact,$s)) { $s = preg_replace($pattern_exact,$replacement,$s,1); file_put_contents($file,$s); echo "Replaced exact placeholder\n"; exit(0);}
 $pattern_key = "/(['\"])userrrrrrrrrr\\1\\s*=>\\s*['\"][^'\"]*['\"]/s";
-if (preg_match($pattern_key, $s)) {
-    $s = preg_replace($pattern_key, "'" . $u_esc . "' => '" . $h_esc . "'", $s, 1);
-    file_put_contents($file, $s);
-    echo "Replaced key 'userrrrrrrrrr' value with new hash.\n";
-    exit(0);
-}
-
-// 3) If literal 'passwordhash' exists anywhere in the file, replace first occurrence
-if (strpos($s, "passwordhash") !== false) {
-    $s = preg_replace("/passwordhash/", $h_esc, $s, 1);
-    file_put_contents($file, $s);
-    echo "Replaced first occurrence of 'passwordhash' with new hash.\n";
-    exit(0);
-}
-
-// 4) If nothing matched, prepend a new $auth_users block (non-destructive)
+if (preg_match($pattern_key,$s)) { $s = preg_replace($pattern_key, "'" . $u_esc . "' => '" . $h_esc . "'", $s,1); file_put_contents($file,$s); echo "Replaced key value\n"; exit(0);}
+if (strpos($s,"passwordhash")!==false) { $s = preg_replace("/passwordhash/",$h_esc,$s,1); file_put_contents($file,$s); echo "Replaced first 'passwordhash'\n"; exit(0);}
 $new_block = "\$auth_users = array(\n    '" . $u_esc . "' => '" . $h_esc . "',\n);\n\n";
-$s = $new_block . $s;
-file_put_contents($file, $s);
-echo "No placeholder found; prepended new \$auth_users block with user '{$u}'.\n";
-exit(0);
+$s = $new_block . $s; file_put_contents($file,$s); echo "Prepended new auth block\n"; exit(0);
 PHP
 
-# 5) Fix ownership/permissions
 sudo chown www-data:www-data "$TFM_FILE" || true
 sudo chmod 640 "$TFM_FILE" || true
-
-# 6) Summary
-echo "Done. Check $TFM_FILE and login with username: $NEW_USER"
-echo "Backup kept at: $BACKUP"
-
-
-
-
-
-
+echo "Done. Login with: $NEW_USER"
 
 
 sudo chown www-data:www-data "$TFM_FILE"
 sudo chmod 640 "$TFM_FILE"
 sudo systemctl reload apache2 || sudo systemctl restart apache2
 
+echo
 echo "✅ Installation completed successfully!"
 echo "➡️  Open: http://<IP-or-domain>/manager.php"
-echo "👤 User: $NEW_USER"
+echo "👤 User: $TFM_USER"
