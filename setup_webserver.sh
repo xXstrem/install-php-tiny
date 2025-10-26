@@ -5,8 +5,10 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-sudo sed -i 's/\$nrconf{restart}.*/$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf \
-  || echo '$nrconf{restart} = "a";' | sudo tee -a /etc/needrestart/needrestart.conf
+# --- منع ظهور نافذة needrestart نهائيًا ---
+sudo bash -c 'cat > /etc/needrestart/needrestart.conf <<CONF
+\$nrconf{restart} = "a";
+CONF'
 
 sudo apt-get update -y
 sudo apt-get -y -o Dpkg::Options::="--force-confdef" \
