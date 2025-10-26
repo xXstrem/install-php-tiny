@@ -1,70 +1,36 @@
-cat <<'EOF' > /tmp/setup_webserver_interactive.sh
 #!/bin/bash
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-# helper to read from tty (fallback to stdin only if no tty)
-_read() {
-  # usage: _read VAR "Prompt"
-  local __varname="$1"; shift
-  local prompt="$*"
-  if [ -c /dev/tty ]; then
-    # read into a temp var then assign to name
-    read -r -p "$prompt" REPLY </dev/tty
-    printf -v "$__varname" '%s' "$REPLY"
-  else
-    # no tty available -> try normal read (may fail in non-interactive)
-    read -r -p "$prompt" REPLY
-    printf -v "$__varname" '%s' "$REPLY"
-  fi
-}
-
-_read_secret() {
-  # usage: _read_secret VAR "Prompt"
-  local __varname="$1"; shift
-  local prompt="$*"
-  if [ -c /dev/tty ]; then
-    # -s for silent, and echo newline after
-    read -s -r -p "$prompt" REPLY </dev/tty
-    echo "" >/dev/tty
-    printf -v "$__varname" '%s' "$REPLY"
-  else
-    # fallback (not hidden)
-    read -s -r -p "$prompt" REPLY
-    echo ""
-    printf -v "$__varname" '%s' "$REPLY"
-  fi
-}
-
-# --- ensure needrestart behaves silently ---
-sudo bash -c 'mkdir -p /etc/needrestart; cat > /etc/needrestart/needrestart.conf <<CONF
+# ====== إعداد needrestart لمنع أي توقف أثناء التحديث ======
+sudo bash -c 'cat > /etc/needrestart/needrestart.conf <<CONF
 $nrconf{restart} = "a";
 CONF'
 
+# ====== تحديث النظام ======
 sudo apt-get update -y
 sudo apt-get -y -o Dpkg::Options::="--force-confdef" \
                 -o Dpkg::Options::="--force-confold" upgrade
 
+# ====== تثبيت Apache ======
 sudo apt-get install -y apache2
 sudo systemctl enable --now apache2
 
-# utilities and php ppa
+# ====== تثبيت PHP ======
 sudo apt-get install -y software-properties-common wget unzip
 sudo add-apt-repository -y ppa:ondrej/php || true
 sudo apt-get update -y
 
-# include php cli to generate bcrypt hashes
 sudo apt-get install -y php7.4 php7.4-cli php7.4-common php7.4-mbstring php7.4-zip php7.4-xml php7.4-curl unzip \
                        php7.4-mysqli php7.4-bcmath php7.4-intl php7.4-gd
 
-# set permissions for web root
 sudo chown -R www-data:www-data /var/www/html
 sudo find /var/www/html -type d -exec chmod 755 {} \;
 sudo find /var/www/html -type f -exec chmod 644 {} \;
 
-# download tinyfilemanager raw and rename to manager.php
+# ====== تحميل TinyFileManager ======
 TFM_RAW_URL="https://raw.githubusercontent.com/prasathmani/tinyfilemanager/master/tinyfilemanager.php"
 sudo wget -q -O /var/www/html/tinyfilemanager.php "$TFM_RAW_URL" || { echo "failed tinyfilemanager.php"; exit 1; }
 
@@ -72,10 +38,32 @@ sudo mv /var/www/html/tinyfilemanager.php /var/www/html/manager.php
 sudo chown www-data:www-data /var/www/html/manager.php
 sudo chmod 640 /var/www/html/manager.php
 
-# reload apache to pick up files
 sudo systemctl reload apache2 || sudo systemctl restart apache2
 
-# show banner
+# ====== دالة قراءة من /dev/tty ======
+_read() {
+  local __var="$1"; shift
+  local prompt="$*"
+  if [ -c /dev/tty ]; then
+    read -r -p "$prompt" "$__var" < /dev/tty
+  else
+    read -r -p "$prompt" "$__var"
+  fi
+}
+
+_read_secret() {
+  local __var="$1"; shift
+  local prompt="$*"
+  if [ -c /dev/tty ]; then
+    read -s -r -p "$prompt" "$__var" < /dev/tty
+    echo "" > /dev/tty
+  else
+    read -s -r -p "$prompt" "$__var"
+    echo ""
+  fi
+}
+
+# ====== عرض البنر ======
 clear
 cat <<'BANNER'
   ______ _ _        __  __                                   
@@ -88,96 +76,72 @@ cat <<'BANNER'
                                              |___/           
 BANNER
 
-# --- interactive prompts (read from /dev/tty so pipe mode works) ---
-# username
-while true; do
-  _read TFM_USER_RAW "Enter username to add/update in manager.php: "
-  if [ -n "${TFM_USER_RAW:-}" ]; then
-    break
-  fi
-  echo "Username cannot be empty. Try again." >/dev/tty
-done
+# ====== إدخال اليوزر والرمز ======
+TFM_USER="${TFM_USER:-}"
+TFM_PASS="${TFM_PASS:-}"
 
-# sanitize username: allow only letters, digits, dot, underscore, hyphen
-TFM_USER=$(printf '%s' "$TFM_USER_RAW" | sed 's/[^A-Za-z0-9._-]//g')
-if [ -z "$TFM_USER" ]; then
-  echo "After sanitization username is empty. Exiting." >/dev/tty
-  exit 1
+if [ -z "$TFM_USER" ] || [ -z "$TFM_PASS" ]; then
+  _read TFM_USER "Enter username for manager.php: "
+  while [ -z "$TFM_USER" ]; do
+    echo "Username cannot be empty." > /dev/tty
+    _read TFM_USER "Enter username for manager.php: "
+  done
+
+  while true; do
+    _read_secret TFM_PASS "Enter password for '$TFM_USER': "
+    _read_secret TFM_PASS2 "Confirm password: "
+    if [ -z "$TFM_PASS" ]; then
+      echo "Password cannot be empty." > /dev/tty
+      continue
+    fi
+    [ "$TFM_PASS" = "$TFM_PASS2" ] && break
+    echo "Passwords do not match. Try again." > /dev/tty
+  done
 fi
-if [ "$TFM_USER" != "$TFM_USER_RAW" ]; then
-  echo "Note: using sanitized username: $TFM_USER" >/dev/tty
-fi
 
-# password (hidden)
-while true; do
-  _read_secret TFM_PASS "Enter password for user '$TFM_USER': "
-  _read_secret TFM_PASS2 "Confirm password: "
-  if [ -z "${TFM_PASS:-}" ]; then
-    echo "Password cannot be empty. Try again." >/dev/tty
-    continue
-  fi
-  if [ "$TFM_PASS" = "$TFM_PASS2" ]; then
-    break
-  fi
-  echo "Passwords do not match — try again." >/dev/tty
-done
-
-# generate bcrypt hash using php
+# ====== تشفير كلمة المرور ======
 TFM_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$TFM_PASS")
 if [ -z "$TFM_HASH" ]; then
-  echo "Failed to generate password hash. Exiting." >/dev/tty
+  echo "Failed to generate password hash."
   exit 1
 fi
 
-# target
 TFM_FILE="/var/www/html/manager.php"
 if [ ! -f "$TFM_FILE" ]; then
-  echo "manager.php not found at $TFM_FILE. Exiting." >/dev/tty
+  echo "manager.php not found at $TFM_FILE. Exiting."
   exit 1
 fi
 
-# escape backslashes and dollar signs for use in perl replacement
 ESC_HASH=$(printf '%s' "$TFM_HASH" | sed 's/\\/\\\\/g; s/\$/\\\$/g')
 
-# insert or update user in $auth_users array
 if grep -q "\$auth_users\s*=" "$TFM_FILE"; then
   if grep -qE "['\"]${TFM_USER}['\"]\s*=>\s*['\"][^'\"]*['\"]" "$TFM_FILE"; then
-    echo "User '$TFM_USER' exists — updating hash." >/dev/tty
+    echo "User '$TFM_USER' exists — updating hash."
     sudo perl -0777 -i -pe "s/(['\"])${TFM_USER}(['\"]\s*=>\s*['\"])[^'\"]*(['\"])/\$1${TFM_USER}\$2${ESC_HASH}\$3/s" "$TFM_FILE"
   else
-    echo "User '$TFM_USER' not found — inserting new entry into \$auth_users array." >/dev/tty
+    echo "Adding user '$TFM_USER' to auth array."
     sudo perl -0777 -i -pe "s/(\$auth_users\s*=\s*array\s*\(\s*)(.*?)(\s*\);)/\$1\$2,\n    '${TFM_USER}' => '${ESC_HASH}'\n\$3/s" "$TFM_FILE"
   fi
 else
-  echo "No \$auth_users array found — prepending a new block." >/dev/tty
+  echo "Creating new auth array."
   TMP_AUTH="$(mktemp)"
-  cat > "$TMP_AUTH" <<EOF2
-\$auth_users = array(
-    '${TFM_USER}' => '${TFM_HASH}'
+  cat > "$TMP_AUTH" <<'PHPBLOCK'
+$auth_users = array(
+    'REPLACE_USER' => 'REPLACE_HASH'
 );
-EOF2
+PHPBLOCK
+  sed -i "s/REPLACE_USER/$TFM_USER/; s|REPLACE_HASH|$TFM_HASH|" "$TMP_AUTH"
   sudo bash -c "cat '$TMP_AUTH' '$TFM_FILE' > '$TFM_FILE.new' && mv '$TFM_FILE.new' '$TFM_FILE'"
   rm -f "$TMP_AUTH"
 fi
 
-sudo chown www-data:www-data "$TFM_FILE" || true
-sudo chmod 640 "$TFM_FILE" || true
+sudo chown www-data:www-data "$TFM_FILE"
+sudo chmod 640 "$TFM_FILE"
 
-echo "Done: user '$TFM_USER' added/updated in $TFM_FILE" >/dev/tty
+sudo systemctl reload apache2 || sudo systemctl restart apache2
 
-echo "" >/dev/tty
-echo "Installation completed successfully!" >/dev/tty
-echo "Now open : http://<IP-or-domain>/manager.php" >/dev/tty
-EOF
-
-chmod +x /tmp/setup_webserver_interactive.sh
-
-# recommended run:
-# if you want to run via pipe and still be prompted, run:
-#   curl -fsSL https://raw.githubusercontent.com/xXstrem/install-php-tiny/main/setup_webserver_interactive.sh | sudo bash -s --
-#
-# or download and run:
-#   curl -fsSL -o /tmp/setup_webserver_interactive.sh https://raw.githubusercontent.com/xXstrem/install-php-tiny/main/setup_webserver_interactive.sh
-#   chmod +x /tmp/setup_webserver_interactive.sh
-#   sudo /tmp/setup_webserver_interactive.sh
+echo ""
+echo "✅ Installation completed successfully!"
+echo "➡️  Now open: http://<IP-or-domain>/manager.php"
+echo "👤 Username: $TFM_USER"
 EOF
