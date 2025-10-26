@@ -163,7 +163,6 @@ sudo chown www-data:www-data "$TFM_FILE"
 sudo chmod 640 "$TFM_FILE"
 sudo systemctl reload apache2 || sudo systemctl restart apache2
 
-echo
 echo "✅ Installation completed successfully!"
 echo "➡️  Open: http://<IP-or-domain>/manager.php"
-echo "👤 User: $TFM_USER"
+echo "👤 User: $NEW_USER"
