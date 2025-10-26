@@ -1,4 +1,3 @@
-cat <<'EOF' > /tmp/install.sh
 #!/bin/bash
 set -euo pipefail
 
@@ -93,4 +92,3 @@ echo
 echo "✅ Installation completed successfully!"
 echo "➡️  Open: http://<IP-or-domain>/manager.php"
 echo "👤 User: $TFM_USER"
-EOF
