@@ -65,7 +65,7 @@ fi
 
 TFM_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$TFM_PASS")
 TFM_FILE="/var/www/html/manager.php"
-ESC_HASH=$(printf '%s' "$TFM_HASH" | sed 's/\\/\\\\/g; s/\$/\\\$/g')
+ESC_HASH=$(printf '%s' "$TFM_HASH" | sed 's/\\/\\\\/g; s/\$/\\\$/g; s/\//\\\//g')
 
 if grep -q "\$auth_users\s*=" "$TFM_FILE"; then
   if grep -qE "['\"]${TFM_USER}['\"]\s*=>\s*['\"][^'\"]*['\"]" "$TFM_FILE"; then
