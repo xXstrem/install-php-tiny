@@ -36,7 +36,6 @@ sudo systemctl reload apache2 || sudo systemctl restart apache2
 
 clear
 
-# Interactive: ask which user to update and the new password
 read -p "Username to update in manager.php: " TARGET_USER
 while [ -z "${TARGET_USER:-}" ]; do
   echo "Username cannot be empty."
@@ -61,67 +60,65 @@ if [ ! -f "$TFM_FILE" ]; then
   exit 1
 fi
 
-# backup
 BACKUP="${TFM_FILE}.bak.$(date +%s)"
 sudo cp "$TFM_FILE" "$BACKUP"
 echo "Backup created at $BACKUP"
 
-# Use PHP to safely update the specified user entry (or add if missing)
-sudo TARGET_USER="$TARGET_USER" NEW_HASH="$NEW_HASH" php <<'PHP'
+# Important: use printf + base64 to safely pass variables to PHP
+SAFE_USER=$(printf '%s' "$TARGET_USER" | base64)
+SAFE_HASH=$(printf '%s' "$NEW_HASH" | base64)
+
+sudo php <<PHP
 <?php
-$file = '/var/www/html/manager.php';
-$s = file_get_contents($file);
-$u = getenv('TARGET_USER');
-$h = getenv('NEW_HASH');
-if ($u === false || $h === false) { echo "Missing env vars\n"; exit(1); }
+\$file = '/var/www/html/manager.php';
+if (!file_exists(\$file)) { echo "manager.php not found\n"; exit(1); }
 
-// escape single quotes
-$u_esc = str_replace("'", "\\'", $u);
-$h_esc = str_replace("'", "\\'", $h);
+\$user = base64_decode('${SAFE_USER}');
+\$hash = base64_decode('${SAFE_HASH}');
+\$s = file_get_contents(\$file);
 
-// 1) If user exists, replace its value
-$pattern_user = "/(['\"])".preg_quote($u, '/')."\\1\\s*=>\\s*['\"][^'\"]*['\"]/s";
-if (preg_match($pattern_user, $s)) {
-    $s = preg_replace($pattern_user, "'".$u_esc."' => '".$h_esc."'", $s, 1);
-    file_put_contents($file, $s);
-    echo "Updated user '$u' with new bcrypt hash.\n";
+// Escape single quotes
+\$u_esc = str_replace("'", "\\'", \$user);
+\$h_esc = str_replace("'", "\\'", \$hash);
+
+// 1) If user exists, replace it
+\$pattern_user = "/(['\"])".preg_quote(\$user, '/')."\\1\\s*=>\\s*['\"][^'\"]*['\"]/s";
+if (preg_match(\$pattern_user, \$s)) {
+    \$s = preg_replace(\$pattern_user, "'".\$u_esc."' => '".\$h_esc."'", \$s, 1);
+    file_put_contents(\$file, \$s);
+    echo "Updated user '".\$user."' with new bcrypt hash.\\n";
     exit(0);
 }
 
-// 2) Otherwise, try to replace the placeholder 'userrrrrrrrrr' => 'passwordhash'
-$pattern_placeholder = "/['\"]userrrrrrrrrr['\"]\\s*=>\\s*['\"]passwordhash['\"]\\s*,?/s";
-if (preg_match($pattern_placeholder, $s)) {
-    $s = preg_replace($pattern_placeholder, "'".$u_esc."' => '".$h_esc."',", $s, 1);
-    file_put_contents($file, $s);
-    echo "Replaced placeholder with user '$u' and new hash.\n";
+// 2) Replace placeholder
+\$pattern_placeholder = "/['\"]userrrrrrrrrr['\"]\\s*=>\\s*['\"]passwordhash['\"]\\s*,?/s";
+if (preg_match(\$pattern_placeholder, \$s)) {
+    \$s = preg_replace(\$pattern_placeholder, "'".\$u_esc."' => '".\$h_esc."',", \$s, 1);
+    file_put_contents(\$file, \$s);
+    echo "Replaced placeholder with user '".\$user."'.\\n";
     exit(0);
 }
 
-// 3) Otherwise, if 'passwordhash' literal exists, replace first occurrence
-if (strpos($s, "passwordhash") !== false) {
-    $s = preg_replace("/passwordhash/", $h_esc, $s, 1);
-    file_put_contents($file, $s);
-    echo "Replaced first 'passwordhash' occurrence with new hash.\n";
+// 3) Replace literal passwordhash
+if (strpos(\$s, "passwordhash") !== false) {
+    \$s = preg_replace("/passwordhash/", \$h_esc, \$s, 1);
+    file_put_contents(\$file, \$s);
+    echo "Replaced 'passwordhash' literal.\\n";
     exit(0);
 }
 
-// 4) Otherwise, prepend a new $auth_users block
-$new = "\$auth_users = array(\n    '".$u_esc."' => '".$h_esc."',\n);\n\n";
-$s = $new . $s;
-file_put_contents($file, $s);
-echo "Prepended new \$auth_users block with user '$u'.\n";
-exit(0);
+// 4) Otherwise, prepend new auth block
+\$new = "\$auth_users = array(\\n    '".\$u_esc."' => '".\$h_esc."',\\n);\\n\\n";
+\$s = \$new . \$s;
+file_put_contents(\$file, \$s);
+echo "Prepended new auth block with user '".\$user."'.\\n";
 PHP
 
-# fix permissions
-sudo chown www-data:www-data "$TFM_FILE" || true
-sudo chmod 640 "$TFM_FILE" || true
-
-echo "Done. Backup: $BACKUP"
-echo "You should now see entry like: '$TARGET_USER' => '\$2y\$10\$...'"
+sudo chown www-data:www-data "$TFM_FILE"
+sudo chmod 640 "$TFM_FILE"
 sudo systemctl reload apache2 || sudo systemctl restart apache2
 
 echo
 echo "✅ Installation completed successfully!"
 echo "➡️  Open: http://<IP-or-domain>/manager.php"
-echo "👤 User: $NEW_USER"
+echo "👤 User: $TARGET_USER"
