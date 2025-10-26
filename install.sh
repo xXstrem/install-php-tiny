@@ -63,27 +63,50 @@ if [ -z "${TFM_USER:-}" ] || [ -z "${TFM_PASS:-}" ]; then
   done
 fi
 
+# generate bcrypt hash
 TFM_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$TFM_PASS")
 TFM_FILE="/var/www/html/manager.php"
-ESC_HASH=$(printf '%s' "$TFM_HASH" | sed 's/\\/\\\\/g; s/\$/\\\$/g; s/\//\\\//g')
 
-if grep -q "\$auth_users\s*=" "$TFM_FILE"; then
-  if grep -qE "['\"]${TFM_USER}['\"]\s*=>\s*['\"][^'\"]*['\"]" "$TFM_FILE"; then
-    sudo perl -0777 -i -pe "s/(['\"])${TFM_USER}(['\"]\s*=>\s*['\"])[^'\"]*(['\"])/\$1${TFM_USER}\$2${ESC_HASH}\$3/s" "$TFM_FILE"
-  else
-    sudo perl -0777 -i -pe "s/(\$auth_users\s*=\s*array\s*\(\s*)(.*?)(\s*\);)/\$1\$2,\n    '${TFM_USER}' => '${ESC_HASH}'\n\$3/s" "$TFM_FILE"
-  fi
-else
-  TMP_AUTH="$(mktemp)"
-  cat > "$TMP_AUTH" <<'AUTH'
-$auth_users = array(
-    'REPLACE_USER' => 'REPLACE_HASH'
-);
-AUTH
-  sed -i "s/REPLACE_USER/$TFM_USER/; s|REPLACE_HASH|$TFM_HASH|" "$TMP_AUTH"
-  sudo bash -c "cat '$TMP_AUTH' '$TFM_FILE' > '$TFM_FILE.new' && mv '$TFM_FILE.new' '$TFM_FILE'"
-  rm -f "$TMP_AUTH"
+if [ ! -f "$TFM_FILE" ]; then
+  echo "manager.php not found at $TFM_FILE. Exiting."
+  exit 1
 fi
+
+# Use PHP to safely add/update the user in manager.php
+sudo TFM_USER="$TFM_USER" TFM_HASH="$TFM_HASH" php - <<'PHP'
+<?php
+$file = '/var/www/html/manager.php';
+if (!file_exists($file)) { echo "manager.php not found\n"; exit(1); }
+$s = file_get_contents($file);
+
+// extract existing auth entries
+preg_match_all("/['\"]([^'\"]+)['\"]\s*=>\s*['\"]([^'\"]+)['\"]/",$s,$m,PREG_SET_ORDER);
+$arr = array();
+foreach($m as $p){ $arr[$p[1]] = $p[2]; }
+
+$u = getenv('TFM_USER');
+$h = getenv('TFM_HASH');
+$arr[$u] = $h;
+
+// build new auth block
+$new = "\$auth_users = array(\n";
+foreach($arr as $k => $v){
+  $k_esc = str_replace("'", "\\'", $k);
+  $v_esc = str_replace("'", "\\'", $v);
+  $new .= "    '".$k_esc."' => '".$v_esc."',\n";
+}
+$new .= ");";
+
+if (preg_match("/\\$auth_users\\s*=\\s*array\\s*\\([^;]*\\);/s",$s)) {
+  $s = preg_replace("/\\$auth_users\\s*=\\s*array\\s*\\([^;]*\\);/s", $new, $s, 1);
+} else {
+  $s = $new . "\n" . $s;
+}
+
+file_put_contents($file, $s);
+echo "ok\n";
+PHP
+
 
 sudo chown www-data:www-data "$TFM_FILE"
 sudo chmod 640 "$TFM_FILE"
