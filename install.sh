@@ -28,10 +28,10 @@ sudo apt-get install -y software-properties-common wget unzip
 sudo add-apt-repository -y ppa:ondrej/php || true
 sudo apt-get update -y
 
-# تثبيت PHP 7.4 وملحقاته الأساسية، بالإضافة إلى الوحدة الضرورية لـ Apache2 (libapache2-mod-php7.4)
+# تثبيت PHP 7.4 وملحقاته الأساسية، بالإضافة إلى الوحدة الضرورية لـ Apache2
 sudo apt-get install -y php7.4 php7.4-cli php7.4-common php7.4-mbstring php7.4-zip php7.4-xml php7.4-curl unzip \
                        php7.4-mysqli php7.4-bcmath php7.4-intl php7.4-gd \
-                       libapache2-mod-php7.4 # ✅ الإصلاح: إضافة وحدة Apache PHP
+                       libapache2-mod-php7.4
 
 # === 4. إعداد الصلاحيات وتنزيل Tiny File Manager ===
 
@@ -60,7 +60,6 @@ BANNER
 
 # === 5. طلب بيانات الاعتماد ===
 
-# طلب اسم المستخدم وكلمة المرور (أو استخدام متغيرات البيئة)
 if [ -z "${TFM_USER:-}" ] || [ -z "${TFM_PASS:-}" ]; then
   read -p "أدخل اسم المستخدم: " TFM_USER
   while [ -z "$TFM_USER" ]; do
@@ -78,7 +77,7 @@ if [ -z "${TFM_USER:-}" ] || [ -z "${TFM_PASS:-}" ]; then
   done
 fi
 
-# === 6. تشفير كلمة المرور وتحديث الملف (مع الإصلاح) ===
+# === 6. تشفير كلمة المرور وتحديث الملف (الإصلاح الحقيقي هنا) ===
 
 # توليد تجزئة bcrypt
 TFM_HASH=$(php -r 'echo password_hash($argv[1], PASSWORD_BCRYPT);' "$TFM_PASS")
@@ -93,34 +92,37 @@ fi
 TFM_PHP_SCRIPT=$(mktemp)
 cat <<'PHP_CODE' > "$TFM_PHP_SCRIPT"
 <?php
-// استخدام متغير البيئة لقراءة المسار
+// جلب المسار واسم المستخدم والهاش من متغيرات البيئة
 $file = getenv('TFM_FILE'); 
+$u = getenv('TFM_USER');
+$h = getenv('TFM_HASH');
+
 if (!file_exists($file)) { echo "manager.php not found\n"; exit(1); }
 $s = file_get_contents($file);
 
-// استخراج مدخلات المصادقة الحالية
-preg_match_all("/['\"]([^'\"]+)['\"]\s*=>\s*['\"]([^'\"]+)['\"]/",$s,$m,PREG_SET_ORDER);
-$arr = array();
-foreach($m as $p){ $arr[$p[1]] = $p[2]; }
+// **البحث عن الكتلة الحالية لـ $auth_users بالكامل**
+// نمط التعبير العادي الأكثر مرونة لالتقاط كل ما بداخل array() بما في ذلك التعليقات والمسافات
+$regex = '/(\$auth_users\s*=\s*array\s*\()([\s\S]*?)(\);)/i';
 
-$u = getenv('TFM_USER');
-$h = getenv('TFM_HASH');
-$arr[$u] = $h;
+// بناء كتلة المصادقة الجديدة (تتضمن المستخدم الجديد فقط)
+// يتم إنشاء الكتلة فقط للمستخدم الذي أدخله المستخدم، مع إمكانية إضافة مستخدمين آخرين لاحقًا.
+$new_auth_entries = "";
+// هروب لاسم المستخدم والهاش
+$k_esc = str_replace("'", "\\'", $u);
+$v_esc = str_replace("'", "\\'", $h);
+$new_auth_entries .= "\n    '".$k_esc."' => '".$v_esc."', // <--- المستخدم الجديد\n";
 
-// بناء كتلة المصادقة الجديدة
-$new = "\$auth_users = array(\n";
-foreach($arr as $k => $v){
-  $k_esc = str_replace("'", "\\'", $k);
-  $v_esc = str_replace("'", "\\'", $v);
-  $new .= "    '".$k_esc."' => '".$v_esc."',\n";
-}
-$new .= ");";
+// بناء الكتلة البديلة
+$new_block = "\$auth_users = array(" . $new_auth_entries . ");";
 
-if (preg_match("/\\$auth_users\\s*=\\s*array\\s*\\([^;]*\\);/s",$s)) {
-  $s = preg_replace("/\\$auth_users\\s*=\\s*array\\s*\\([^;]*\\);/s", $new, $s, 1);
+// استبدال كتلة $auth_users القديمة بالكامل بالكتلة الجديدة (هذا يحل مشكلة البيانات القديمة)
+if (preg_match($regex, $s)) {
+    // تم العثور على الكتلة، استبدلها
+    $s = preg_replace($regex, $new_block, $s, 1);
 } else {
-  // إضافة الكتلة الجديدة إذا لم يتم العثور عليها - نقطة ضعف محتملة في Tiny File Manager
-  $s = $new . "\n" . $s;
+    // إذا لم يتم العثور على الكتلة، قم بإضافتها في الأعلى.
+    // هذه حالة نادرة ويجب أن تكون موجودة دائمًا في tinyfilemanager.php
+    $s = $new_block . "\n" . $s;
 }
 
 file_put_contents($file, $s);
